@@ -22,7 +22,6 @@
 #include <inttypes.h>
 
 #include <android-base/unique_fd.h>
-#include <android-modules-utils/sdk_level.h>
 #include <bpf/WaitForProgsLoaded.h>
 #include <log/log.h>
 #include <netdutils/UidConstants.h>
@@ -37,6 +36,10 @@ using base::unique_fd;
 using base::WaitForProperty;
 using bpf::getSocketCookie;
 using bpf::isAtLeastKernelVersion;
+using bpf::isAtLeastT;
+using bpf::isAtLeastU;
+using bpf::isAtLeastV;
+using bpf::isAtLeast25Q2;
 using bpf::queryProgram;
 using bpf::retrieveProgram;
 using netdutils::Status;
@@ -72,18 +75,11 @@ static Status checkProgramAccessible(const char* programPath) {
     return netdutils::status::ok;
 }
 
-// Checks if the device is running on release version of Android 25Q2 or newer.
-static bool isAtLeast25Q2() {
-    return android_get_device_api_level() >= 36 ||
-           (android_get_device_api_level() == 35 &&
-            modules::sdklevel::detail::IsAtLeastPreReleaseCodename("Baklava"));
-}
-
 static Status initPrograms(const char* cg2_path) {
     if (!cg2_path) return Status("cg2_path is NULL");
 
     // This code was mainlined in T, so this should be trivially satisfied.
-    if (!modules::sdklevel::IsAtLeastT()) return Status("S- platform is unsupported");
+    if (!isAtLeastT) return Status("S- platform is unsupported");
 
     // S requires eBPF support which was only added in 4.9, so this should be satisfied.
     if (!isAtLeastKernelVersion(4, 9, 0)) {
@@ -91,22 +87,22 @@ static Status initPrograms(const char* cg2_path) {
     }
 
     // U bumps the kernel requirement up to 4.14
-    if (modules::sdklevel::IsAtLeastU() && !isAtLeastKernelVersion(4, 14, 0)) {
+    if (isAtLeastU && !isAtLeastKernelVersion(4, 14, 0)) {
         return Status("U+ platform with kernel version < 4.14.0 is unsupported");
     }
 
     // U mandates this mount point (though it should also be the case on T)
-    if (modules::sdklevel::IsAtLeastU() && !!strcmp(cg2_path, "/sys/fs/cgroup")) {
+    if (isAtLeastU && !!strcmp(cg2_path, "/sys/fs/cgroup")) {
         return Status("U+ platform with cg2_path != /sys/fs/cgroup is unsupported");
     }
 
     // V bumps the kernel requirement up to 4.19
-    if (modules::sdklevel::IsAtLeastV() && !isAtLeastKernelVersion(4, 19, 0)) {
+    if (isAtLeastV && !isAtLeastKernelVersion(4, 19, 0)) {
         return Status("V+ platform with kernel version < 4.19.0 is unsupported");
     }
 
     // 25Q2 bumps the kernel requirement up to 5.4
-    if (isAtLeast25Q2() && !isAtLeastKernelVersion(5, 4, 0)) {
+    if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4, 0)) {
         return Status("25Q2+ platform with kernel version < 5.4.0 is unsupported");
     }
 
@@ -135,7 +131,7 @@ static Status initPrograms(const char* cg2_path) {
                                     cg_fd, BPF_CGROUP_INET_SOCK_RELEASE));
     }
 
-    if (modules::sdklevel::IsAtLeastV()) {
+    if (isAtLeastV) {
         // V requires 4.19+, so technically this 2nd 'if' is not required, but it
         // doesn't hurt us to try to support AOSP forks that try to support older kernels.
         if (isAtLeastKernelVersion(4, 19, 0)) {
@@ -180,7 +176,7 @@ static Status initPrograms(const char* cg2_path) {
         if (queryProgram(cg_fd, BPF_CGROUP_INET_SOCK_RELEASE) <= 0) abort();
     }
 
-    if (modules::sdklevel::IsAtLeastV()) {
+    if (isAtLeastV) {
         // V requires 4.19+, so technically this 2nd 'if' is not required, but it
         // doesn't hurt us to try to support AOSP forks that try to support older kernels.
         if (isAtLeastKernelVersion(4, 19, 0)) {
@@ -266,14 +262,23 @@ Status BpfHandler::init(const char* cg2_path) {
     // ...unless someone changed 'exec_start bpfloader' to 'start bpfloader'
     // in the rc file.
     //
-    // TODO: should be: if (!modules::sdklevel::IsAtLeastW())
-    if (android_get_device_api_level() <= __ANDROID_API_V__) waitForBpf();
+    if (!isAtLeast25Q2) waitForBpf();
 
     RETURN_IF_NOT_OK(initPrograms(cg2_path));
     RETURN_IF_NOT_OK(initMaps());
 
-    if (android_get_device_api_level() > __ANDROID_API_V__) {
-        // make sure netd can create & write maps.  sepolicy is V+, but enough to enforce on 25Q2+
+    if (isAtLeast25Q2) {
+        struct rlimit limit = {
+            .rlim_cur = 1u << 30,  // 1 GiB
+            .rlim_max = 1u << 30,  // 1 GiB
+        };
+        // 25Q2 netd.rc includes "rlimit memlock 1073741824 1073741824"
+        // so this should be a no-op, and thus just succeed.
+        // make sure it isn't lowered in platform netd.rc...
+        if (setrlimit(RLIMIT_MEMLOCK, &limit))
+            return statusFromErrno(errno, "Failed to set 1GiB RLIMIT_MEMLOCK");
+
+        // Make sure netd can create & write maps.  sepolicy is V+, but enough to enforce on 25Q2+
         int key = 1;
         int value = 123;
         unique_fd map(bpf::createMap(BPF_MAP_TYPE_ARRAY, sizeof(key), sizeof(value), 2, 0));
@@ -346,8 +351,8 @@ int BpfHandler::tagSocket(int sockFd, uint32_t tag, uid_t chargeUid, uid_t realU
     if (chargeUid == AID_CLAT) return -EPERM;
 
     // The socket destroy listener only monitors on the group {INET_TCP, INET_UDP, INET6_TCP,
-    // INET6_UDP}. Tagging listener unsupported socket causes that the tag can't be removed from
-    // tag map automatically. Eventually, the tag map may run out of space because of dead tag
+    // INET6_UDP}. Tagging listener unsupported sockets (on <5.10) means the tag cannot be
+    // removed from tag map automatically. Eventually, it may run out of space due to dead tag
     // entries. Note that although tagSocket() of net client has already denied the family which
     // is neither AF_INET nor AF_INET6, the family validation is still added here just in case.
     // See tagSocket in system/netd/client/NetdClient.cpp and
@@ -365,15 +370,19 @@ int BpfHandler::tagSocket(int sockFd, uint32_t tag, uid_t chargeUid, uid_t realU
         return -EAFNOSUPPORT;
     }
 
-    int socketProto;
-    socklen_t protoLen = sizeof(socketProto);
-    if (getsockopt(sockFd, SOL_SOCKET, SO_PROTOCOL, &socketProto, &protoLen)) {
-        ALOGE("Failed to getsockopt SO_PROTOCOL: %s, fd: %d", strerror(errno), sockFd);
-        return -errno;
-    }
-    if (socketProto != IPPROTO_UDP && socketProto != IPPROTO_TCP) {
-        ALOGV("Unsupported protocol: %d", socketProto);
-        return -EPROTONOSUPPORT;
+    // On 5.10+ the BPF_CGROUP_INET_SOCK_RELEASE hook takes care of cookie tag map cleanup
+    // during socket destruction. As such the socket destroy listener is superfluous.
+    if (!isAtLeastKernelVersion(5, 10, 0)) {
+        int socketProto;
+        socklen_t protoLen = sizeof(socketProto);
+        if (getsockopt(sockFd, SOL_SOCKET, SO_PROTOCOL, &socketProto, &protoLen)) {
+            ALOGE("Failed to getsockopt SO_PROTOCOL: %s, fd: %d", strerror(errno), sockFd);
+            return -errno;
+        }
+        if (socketProto != IPPROTO_UDP && socketProto != IPPROTO_TCP) {
+            ALOGV("Unsupported protocol: %d", socketProto);
+            return -EPROTONOSUPPORT;
+        }
     }
 
     uint64_t sock_cookie = getSocketCookie(sockFd);

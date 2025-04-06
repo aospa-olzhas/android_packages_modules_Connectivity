@@ -28,6 +28,8 @@ import android.os.ConfigUpdate;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.util.Collection;
+
 /** Implementation of the Certificate Transparency job */
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 public class CertificateTransparencyJob extends BroadcastReceiver {
@@ -37,7 +39,8 @@ public class CertificateTransparencyJob extends BroadcastReceiver {
     private final Context mContext;
     private final DataStore mDataStore;
     private final CertificateTransparencyDownloader mCertificateTransparencyDownloader;
-    private final CompatibilityVersion mCompatVersion;
+    private final SignatureVerifier mSignatureVerifier;
+    private final Collection<CompatibilityVersion> mCompatVersions;
     private final AlarmManager mAlarmManager;
     private final PendingIntent mPendingIntent;
 
@@ -49,11 +52,13 @@ public class CertificateTransparencyJob extends BroadcastReceiver {
             Context context,
             DataStore dataStore,
             CertificateTransparencyDownloader certificateTransparencyDownloader,
-            CompatibilityVersion compatVersion) {
+            SignatureVerifier signatureVerifier,
+            Collection<CompatibilityVersion> compatVersions) {
         mContext = context;
         mDataStore = dataStore;
         mCertificateTransparencyDownloader = certificateTransparencyDownloader;
-        mCompatVersion = compatVersion;
+        mSignatureVerifier = signatureVerifier;
+        mCompatVersions = compatVersions;
 
         mAlarmManager = context.getSystemService(AlarmManager.class);
         mPendingIntent =
@@ -96,7 +101,9 @@ public class CertificateTransparencyJob extends BroadcastReceiver {
         }
         mDependenciesReady = false;
 
-        mCompatVersion.delete();
+        for (CompatibilityVersion compatVersion : mCompatVersions) {
+            compatVersion.delete();
+        }
 
         if (Config.DEBUG) {
             Log.d(TAG, "CertificateTransparencyJob canceled.");
@@ -126,7 +133,7 @@ public class CertificateTransparencyJob extends BroadcastReceiver {
 
     private void startDependencies() {
         mDataStore.load();
-        mCertificateTransparencyDownloader.addCompatibilityVersion(mCompatVersion);
+        mSignatureVerifier.loadAllowedKeys();
         mContext.registerReceiver(
                 mCertificateTransparencyDownloader,
                 new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
@@ -139,7 +146,7 @@ public class CertificateTransparencyJob extends BroadcastReceiver {
 
     private void stopDependencies() {
         mContext.unregisterReceiver(mCertificateTransparencyDownloader);
-        mCertificateTransparencyDownloader.clearCompatibilityVersions();
+        mSignatureVerifier.clearAllowedKeys();
         mDataStore.delete();
 
         if (Config.DEBUG) {

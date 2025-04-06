@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package android.net.thread
+package android.net.thread.borderrouter
 
 import android.content.Context
 import android.net.DnsResolver.CLASS_IN
@@ -60,10 +60,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /** Integration test cases for Thread Internet Access features. */
+@LargeTest
 @RunWith(AndroidJUnit4::class)
 @RequiresThreadFeature
 @RequiresSimulationThreadDevice
-@LargeTest
 class InternetAccessTest {
     companion object {
         private val TAG = BorderRoutingTest::class.java.simpleName
@@ -167,6 +167,8 @@ class InternetAccessTest {
         val ftd = ftds[0]
         joinNetworkAndWaitForOmr(ftd, DEFAULT_DATASET)
         dnsServer.start()
+        ftd.autoStartSrpClient()
+        ftd.waitForSrpServer()
 
         val ipv4Addresses =
             ftd.resolveHost("google.com", TYPE_A).map { extractIpv4AddressFromMappedAddress(it) }
@@ -181,6 +183,8 @@ class InternetAccessTest {
         val ftd = ftds[0]
         joinNetworkAndWaitForOmr(ftd, DEFAULT_DATASET)
         dnsServer.start()
+        ftd.autoStartSrpClient()
+        ftd.waitForSrpServer()
 
         assertThat(ftd.resolveHost("google.com", TYPE_A)).isEmpty()
         assertThat(ftd.resolveHost("google.com", TYPE_AAAA)).isEmpty()

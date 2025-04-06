@@ -36,6 +36,7 @@ import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.ParcelFileDescriptor.AutoCloseInputStream
 import android.telephony.TelephonyManager
 import android.telephony.TelephonyManager.SIM_STATE_UNKNOWN
 import android.util.Log
@@ -45,8 +46,8 @@ import com.android.modules.utils.build.SdkLevel.isAtLeastS
 import java.io.ByteArrayOutputStream
 import java.io.CharArrayWriter
 import java.io.File
-import java.io.FileOutputStream
 import java.io.FileReader
+import java.io.InputStream
 import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
@@ -224,7 +225,7 @@ class ConnectivityDiagnosticsCollector : BaseMetricListener() {
             // Echo the current pid, and replace it (with exec) with the tcpdump process, so the
             // tcpdump pid is known.
             writer.write(
-                "echo $$; exec su 0 tcpdump -n -i any -U -xx".encodeToByteArray()
+                "echo $$; exec su 0 tcpdump -n -i any -l -xx".encodeToByteArray()
             )
         }
         val reader = FileReader(stdout.fileDescriptor).buffered()
@@ -280,7 +281,7 @@ class ConnectivityDiagnosticsCollector : BaseMetricListener() {
         }
         val outFile = File(collectorDir, filename + FILENAME_SUFFIX)
         outputFiles.add(filename)
-        FileOutputStream(outFile).use { fos ->
+        getOutputStreamViaShell(outFile).use { fos ->
             failureHeader?.let {
                 fos.write(it.toByteArray())
                 fos.write("\n".toByteArray())
@@ -430,19 +431,63 @@ class ConnectivityDiagnosticsCollector : BaseMetricListener() {
      * @param dumpsysCmd The dumpsys command to run (for example "connectivity").
      * @param exceptionContext An exception to write a stacktrace to the dump for context.
      */
-    fun collectDumpsys(dumpsysCmd: String, exceptionContext: Throwable? = null) {
-        Log.i(TAG, "Collecting dumpsys $dumpsysCmd for test artifacts")
+    fun collectDumpsys(dumpsysCmd: String, exceptionContext: Throwable? = null) =
+        collectCommandOutput("dumpsys $dumpsysCmd", exceptionContext = exceptionContext)
+
+    /**
+     * Add the output of a command to the test data dump.
+     *
+     * <p>The output will be collected immediately, and exported to a test artifact file when the
+     * test ends.
+     * @param cmd The command to run. Stdout of the command will be collected.
+     * @param shell The shell to run the command in, for example "sh".
+     * @param exceptionContext An exception to write a stacktrace to the dump for context.
+     */
+    @RequiresApi(Build.VERSION_CODES.S)
+    fun collectCommandOutput(
+        cmd: String,
+        shell: String,
+        exceptionContext: Throwable? = null
+    ) = collectCommandOutput(cmd, exceptionContext) { c, outputProcessor ->
+        runCommandInShell(c, shell, outputProcessor)
+    }
+
+    /**
+     * Add the output of a command to the test data dump.
+     *
+     * <p>The output will be collected immediately, and exported to a test artifact file when the
+     * test ends.
+     *
+     * <p>Note this does not support shell pipes, redirections, or quoted arguments. See the S+
+     * overload if that is needed.
+     * @param cmd The command to run. Stdout of the command will be collected.
+     * @param exceptionContext An exception to write a stacktrace to the dump for context.
+     */
+    fun collectCommandOutput(
+        cmd: String,
+        exceptionContext: Throwable? = null
+    ) = collectCommandOutput(cmd, exceptionContext) { c, outputProcessor ->
+        AutoCloseInputStream(
+            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(c)
+        ).use {
+            outputProcessor(it)
+        }
+    }
+
+    private fun collectCommandOutput(
+        cmd: String,
+        exceptionContext: Throwable? = null,
+        commandRunner: (String, (InputStream) -> Unit) -> Unit
+    ) {
+        Log.i(TAG, "Collecting '$cmd' for test artifacts")
         PrintWriter(buffer).let {
-            it.println("--- Dumpsys $dumpsysCmd at ${ZonedDateTime.now()} ---")
+            it.println("--- $cmd at ${ZonedDateTime.now()} ---")
             maybeWriteExceptionContext(it, exceptionContext)
             it.flush()
         }
-        ParcelFileDescriptor.AutoCloseInputStream(
-            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
-                "dumpsys $dumpsysCmd"
-            )
-        ).use {
-            it.copyTo(buffer)
+
+        commandRunner(cmd) { stdout ->
+            stdout.copyTo(buffer)
         }
     }
 

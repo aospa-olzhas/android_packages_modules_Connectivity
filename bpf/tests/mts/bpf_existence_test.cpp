@@ -31,6 +31,12 @@ using std::set;
 using std::string;
 
 using android::bpf::isAtLeastKernelVersion;
+using android::bpf::isAtLeastR;
+using android::bpf::isAtLeastS;
+using android::bpf::isAtLeastT;
+using android::bpf::isAtLeastU;
+using android::bpf::isAtLeastV;
+using android::bpf::isAtLeast25Q2;
 
 #define PLATFORM "/sys/fs/bpf/"
 #define TETHERING "/sys/fs/bpf/tethering/"
@@ -41,16 +47,6 @@ using android::bpf::isAtLeastKernelVersion;
 
 class BpfExistenceTest : public ::testing::Test {
 };
-
-const bool unreleased = (android::base::GetProperty("ro.build.version.codename", "REL") != "REL");
-const int api_level = unreleased ? 10000 : android_get_device_api_level();
-const bool isAtLeastR = (api_level >= 30);
-const bool isAtLeastS = (api_level >= 31);
-// Sv2 is 32
-const bool isAtLeastT = (api_level >= 33);
-const bool isAtLeastU = (api_level >= 34);
-const bool isAtLeastV = (api_level >= 35);
-const bool isAtLeast25Q2 = (api_level >= 36);
 
 // Part of Android R platform (for 4.9+), but mainlined in S
 static const set<string> PLATFORM_ONLY_IN_R = {
@@ -200,7 +196,12 @@ TEST_F(BpfExistenceTest, TestPrograms) {
 
     // S requires Linux Kernel 4.9+ and thus requires eBPF support.
     if (isAtLeastS) ASSERT_TRUE(isAtLeastKernelVersion(4, 9, 0));
-    DO_EXPECT(isAtLeastS, MAINLINE_FOR_S_PLUS);
+
+    // on S without a new enough DnsResolver apex, NetBpfLoad doesn't get triggered,
+    // and thus no mainline programs get loaded.
+    bool mainlineBpfCapableResolve = !access("/apex/com.android.resolv/NetBpfLoad-S.flag", F_OK);
+    bool mainlineNetBpfLoad = isAtLeastT || mainlineBpfCapableResolve;
+    DO_EXPECT(isAtLeastS && mainlineNetBpfLoad, MAINLINE_FOR_S_PLUS);
 
     // Nothing added or removed in SCv2.
 
